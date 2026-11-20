@@ -176,8 +176,16 @@ jobs:
           if (-not $env:TS_KEY -or -not $env:TS_KEY.StartsWith('tskey-auth-')) {
             Write-Error 'Secret TAILSCALE_AUTH_KEY ausente ou inválido.'; exit 1
           }
-          if (-not $env:RDP_PASSWORD) { Write-Error 'Secret RDP_PASSWORD ausente.'; exit 1 }
-          if (-not $env:RCLONE_CONFIG_B64) { Write-Error 'Secret RCLONE_CONFIG_B64 ausente.'; exit 1 }
+          # Senha: usa o secret RDP_PASSWORD se existir; senão mantém a senha padrão de sempre.
+          $senha = if ($env:RDP_PASSWORD) { $env:RDP_PASSWORD } else { 'Gamer2026Abc' }
+          echo "::add-mask::$senha"
+          "RDP_SENHA=$senha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # Armazenamento (backup/migração): opcional. Sem o secret, o PC liga normalmente, sem backup.
+          if ($env:RCLONE_CONFIG_B64) { $st = 'STORAGE=1' } else {
+            $st = 'STORAGE=0'
+            Write-Host '::warning::Secret RCLONE_CONFIG_B64 ausente: o PC liga normalmente, mas SEM backup e SEM migração automática.'
+          }
+          $st | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $m = 0
           if (-not [int]::TryParse($env:MINUTOS, [ref]$m) -or $m -lt 1 -or $m -gt 340) {
             Write-Error 'minutos deve ser entre 1 e 340.'; exit 1
@@ -187,7 +195,6 @@ jobs:
             Write-Error 'migrar_aos deve ser entre 10 e 330.'; exit 1
           }
           echo "::add-mask::$env:TS_KEY"
-          echo "::add-mask::$env:RDP_PASSWORD"
           "START_EPOCH=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "START_ISO=$((Get-Date).ToUniversalTime().ToString('o'))" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
@@ -195,13 +202,15 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force 'C:\pc' | Out-Null
-          $arch = if ($env:RUNNER_TIPO -eq 'windows-11-arm') { 'arm64' } else { 'amd64' }
-          $zip = 'C:\pc\rclone.zip'
-          Invoke-WebRequest -UseBasicParsing -Uri "https://downloads.rclone.org/rclone-current-windows-$arch.zip" -OutFile $zip
-          Expand-Archive $zip -DestinationPath 'C:\pc\rc' -Force
-          Copy-Item (Get-ChildItem 'C:\pc\rc' -Recurse -Filter rclone.exe | Select-Object -First 1).FullName 'C:\pc\rclone.exe'
-          [IO.File]::WriteAllBytes('C:\pc\rclone.conf', [Convert]::FromBase64String($env:RCLONE_CONFIG_B64))
-          & 'C:\pc\rclone.exe' version | Select-Object -First 1
+          if ($env:STORAGE -eq '1') {
+            $arch = if ($env:RUNNER_TIPO -eq 'windows-11-arm') { 'arm64' } else { 'amd64' }
+            $zip = 'C:\pc\rclone.zip'
+            Invoke-WebRequest -UseBasicParsing -Uri "https://downloads.rclone.org/rclone-current-windows-$arch.zip" -OutFile $zip
+            Expand-Archive $zip -DestinationPath 'C:\pc\rc' -Force
+            Copy-Item (Get-ChildItem 'C:\pc\rc' -Recurse -Filter rclone.exe | Select-Object -First 1).FullName 'C:\pc\rclone.exe'
+            [IO.File]::WriteAllBytes('C:\pc\rclone.conf', [Convert]::FromBase64String($env:RCLONE_CONFIG_B64))
+            & 'C:\pc\rclone.exe' version | Select-Object -First 1
+          }
           @'
           NTUSER.DAT*
           ntuser.ini
@@ -368,7 +377,7 @@ jobs:
           '@ | Set-Content 'C:\pc\lib.ps1' -Encoding utf8
 
       - name: Verificar se já existe PC ativo
-        if: ${{ inputs.origem_run == '' }}
+        if: ${{ inputs.origem_run == '' && env.STORAGE == '1' }}
         shell: pwsh
         run: |
           . 'C:\pc\lib.ps1'
@@ -388,7 +397,7 @@ jobs:
       - name: Criar usuário Rafael e habilitar RDP
         shell: pwsh
         run: |
-          $sec = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          $sec = ConvertTo-SecureString $env:RDP_SENHA -AsPlainText -Force
           New-LocalUser -Name 'Rafael' -Password $sec -FullName 'Rafael' -PasswordNeverExpires -AccountNeverExpires | Out-Null
           Add-LocalGroupMember -Group 'Administrators' -Member 'Rafael'
           Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'Rafael'
@@ -405,19 +414,5 @@ jobs:
           New-Item -ItemType Directory -Force 'C:\Games' | Out-Null
 
       - name: Restaurar dados do jogador
-        shell: pwsh
-        run: |
-          . 'C:\pc\lib.ps1'
-          $b = Get-State 'last_backup'
-          if (-not $b) {
-            if ($env:ORIGEM_RUN) { Write-Error 'Migração sem backup disponível.'; exit 1 }
-            Log 'Primeira execução: nenhum backup para restaurar.'
-          } else {
-            Log "Restaurando backup de $($b.em)..."
-            if (-not (Invoke-Restore)) {
-              Write-Error 'Restauração NÃO foi concluída/verificada. Esta máquina não será confirmada.'
-              exit 1
-            }
-            Log 'Restauração concluída e verificada.'
-          }
-        
+        if: ${{ env.STORAGE == '1' }}
+ 
