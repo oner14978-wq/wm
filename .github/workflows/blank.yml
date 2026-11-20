@@ -68,6 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
+      RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
       RCLONE_CONFIG_B64: ${{ secrets.RCLONE_CONFIG_B64 }}
       GH_TOKEN: ${{ github.token }}
       ACAO: ${{ inputs.acao }}
@@ -81,11 +82,12 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          if [ -z "${RCLONE_CONFIG_B64:-}" ]; then echo "Secret RCLONE_CONFIG_B64 ausente."; exit 1; fi
+          if [ -z "${RCLONE_CONFIG:-}" ] && [ -z "${RCLONE_CONFIG_B64:-}" ]; then echo "Secret RCLONE_CONFIG ausente."; exit 1; fi
           curl -fsSL https://rclone.org/install.sh | sudo bash >/dev/null 2>&1 || true
           command -v rclone >/dev/null || { echo "Falha ao instalar rclone."; exit 1; }
           mkdir -p ~/.config/rclone
-          echo "$RCLONE_CONFIG_B64" | base64 -d > ~/.config/rclone/rclone.conf
+          if [ -n "${RCLONE_CONFIG:-}" ]; then printf '%s\n' "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
+          else echo "$RCLONE_CONFIG_B64" | base64 -d > ~/.config/rclone/rclone.conf; fi
           R="$REMOTE"
 
           get() { rclone cat "$R/state/$1.json" 2>/dev/null; }
@@ -161,6 +163,7 @@ jobs:
     env:
       TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+      RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
       RCLONE_CONFIG_B64: ${{ secrets.RCLONE_CONFIG_B64 }}
       GH_TOKEN: ${{ github.token }}
       ACAO: ${{ inputs.acao }}
@@ -181,9 +184,9 @@ jobs:
           echo "::add-mask::$senha"
           "RDP_SENHA=$senha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           # Armazenamento (backup/migração): opcional. Sem o secret, o PC liga normalmente, sem backup.
-          if ($env:RCLONE_CONFIG_B64) { $st = 'STORAGE=1' } else {
+          if ($env:RCLONE_CONFIG -or $env:RCLONE_CONFIG_B64) { $st = 'STORAGE=1' } else {
             $st = 'STORAGE=0'
-            Write-Host '::warning::Secret RCLONE_CONFIG_B64 ausente: o PC liga normalmente, mas SEM backup e SEM migração automática.'
+            Write-Host '::warning::Secret RCLONE_CONFIG ausente: o PC liga normalmente, mas SEM backup e SEM migração automática.'
           }
           $st | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $m = 0
@@ -208,7 +211,8 @@ jobs:
             Invoke-WebRequest -UseBasicParsing -Uri "https://downloads.rclone.org/rclone-current-windows-$arch.zip" -OutFile $zip
             Expand-Archive $zip -DestinationPath 'C:\pc\rc' -Force
             Copy-Item (Get-ChildItem 'C:\pc\rc' -Recurse -Filter rclone.exe | Select-Object -First 1).FullName 'C:\pc\rclone.exe'
-            [IO.File]::WriteAllBytes('C:\pc\rclone.conf', [Convert]::FromBase64String($env:RCLONE_CONFIG_B64))
+            if ($env:RCLONE_CONFIG) { [IO.File]::WriteAllText('C:\pc\rclone.conf', ($env:RCLONE_CONFIG.Trim() + "`n")) }
+            else { [IO.File]::WriteAllBytes('C:\pc\rclone.conf', [Convert]::FromBase64String($env:RCLONE_CONFIG_B64)) }
             & 'C:\pc\rclone.exe' version | Select-Object -First 1
           }
           @'
@@ -377,9 +381,9 @@ jobs:
           '@ | Set-Content 'C:\pc\lib.ps1' -Encoding utf8
 
       - name: Verificar se já existe PC ativo
-        if: ${{ inputs.origem_run == '' && env.STORAGE == '1' }}
         shell: pwsh
         run: |
+          if ($env:STORAGE -ne '1' -or $env:ORIGEM_RUN) { Write-Host 'Nada a verificar.'; exit 0 }
           . 'C:\pc\lib.ps1'
           $c = Get-State 'current'
           if ($c -and $c.status -ne 'desligado') {
@@ -408,11 +412,4 @@ jobs:
           # Cria o perfil do usuário agora, para a restauração cair no lugar certo
           try {
             $cred = New-Object System.Management.Automation.PSCredential('.\Rafael', $sec)
-            Start-Process -FilePath cmd.exe -ArgumentList '/c exit 0' -Credential $cred -LoadUserProfile -WorkingDirectory 'C:\Windows\System32' -Wait -WindowStyle Hidden
-          } catch { Write-Host "Aviso ao criar perfil: $($_.Exception.Message)" }
-          if (-not (Test-Path 'C:\Users\Rafael\NTUSER.DAT')) { Write-Host 'Aviso: perfil do Rafael ainda não existe; será criado no primeiro login.' }
-          New-Item -ItemType Directory -Force 'C:\Games' | Out-Null
-
-      - name: Restaurar dados do jogador
-        if: ${{ env.STORAGE == '1' }}
- 
+            Start-Process -FilePath cmd.exe -ArgumentList '/c exit 0' -Credential $cred -LoadUserProfile -WorkingDirectory 'C
