@@ -9,7 +9,7 @@ on:
         default: windows-11-arm
         options:
           - windows-11-arm
-          - windows-11-arm
+          - windows-l1-arm
       minutos:
         description: "Minutos ligado (máx. 340)"
         type: string
@@ -31,9 +31,14 @@ jobs:
         shell: pwsh
         env:
           TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           if (-not $env:TS_KEY -or -not $env:TS_KEY.StartsWith('tskey-auth-')) {
             Write-Error 'Secret TAILSCALE_AUTH_KEY ausente ou inválido.'
+            exit 1
+          }
+          if (-not $env:RDP_PASSWORD) {
+            Write-Error 'Secret RDP_PASSWORD ausente.'
             exit 1
           }
           $m = 0
@@ -44,9 +49,11 @@ jobs:
 
       - name: Criar usuário Rafael e habilitar RDP
         shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          $senha = 'Gamer2026Abc'
-          $sec = ConvertTo-SecureString $senha -AsPlainText -Force
+          echo "::add-mask::$env:RDP_PASSWORD"
+          $sec = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
           New-LocalUser -Name 'Rafael' -Password $sec -FullName 'Rafael' -PasswordNeverExpires -AccountNeverExpires | Out-Null
           Add-LocalGroupMember -Group 'Administrators' -Member 'Rafael'
           Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'Rafael'
@@ -65,13 +72,18 @@ jobs:
           $msi = Join-Path $env:TEMP 'tailscale.msi'
           Invoke-WebRequest -UseBasicParsing -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-$arch.msi" -OutFile $msi
           Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
-          Start-Sleep -Seconds 15
           $ts = 'C:\Program Files\Tailscale\tailscale.exe'
+          Start-Service Tailscale -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 20
+          & $ts version
+          $ok = $false
           for ($i = 1; $i -le 5; $i++) {
-            & $ts up --auth-key="$env:TS_KEY" --hostname='${{ inputs.nome_pc }}' --accept-routes
-            if ($LASTEXITCODE -eq 0) { break }
+            & $ts up --auth-key="$env:TS_KEY" --hostname='${{ inputs.nome_pc }}' --unattended --accept-routes --reset 2>&1 | Write-Host
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
             Start-Sleep -Seconds 10
           }
+          if (-not $ok) { Write-Error 'tailscale up falhou'; exit 1 }
+          & $ts status
 
       - name: IP
         shell: pwsh
@@ -91,13 +103,13 @@ jobs:
         run: |
           Write-Host "=========================================="
           Write-Host "Conta do Windows: Rafael"
-          Write-Host "Senha da conta do Windows: Gamer2026Abc"
+          Write-Host "Senha: a do secret RDP_PASSWORD"
           Write-Host "Codigo de acesso (IP Tailscale): $env:TS_IP"
           Write-Host "=========================================="
           @(
             "## ✅ PC remoto no ar",
             "- Conta do Windows: **Rafael**",
-            "- Senha da conta do Windows: ``Gamer2026Abc``",
+            "- Senha: a do secret ``RDP_PASSWORD``",
             "- Código de acesso (IP Tailscale): ``$env:TS_IP``"
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
