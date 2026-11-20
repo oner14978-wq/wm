@@ -380,6 +380,7 @@ jobs:
           }
           '@ | Set-Content 'C:\pc\lib.ps1' -Encoding utf8
 
+      # ===== PASSO CORRIGIDO =====
       - name: Verificar se já existe PC ativo
         shell: pwsh
         run: |
@@ -387,8 +388,27 @@ jobs:
           . 'C:\pc\lib.ps1'
           $c = Get-State 'current'
           if ($c -and $c.status -ne 'desligado') {
-            $age = ((Get-Date).ToUniversalTime() - [datetime]::Parse($c.last_seen).ToUniversalTime()).TotalMinutes
-            if ($age -lt 15) {
+            $ativo = $true
+            # 1) Sinal de vida: converte last_seen sem distorcer o fuso
+            try {
+              $ls = [datetimeoffset]$c.last_seen
+              $age = ((Get-Date).ToUniversalTime() - $ls.UtcDateTime).TotalMinutes
+              if ($age -ge 15) { $ativo = $false }
+            } catch {
+              Write-Host "::warning::Não consegui ler last_seen; considerando o PC antigo inativo."
+              $ativo = $false
+            }
+            # 2) Confirma no GitHub se a execução antiga ainda está rodando
+            if ($ativo -and $c.run_id) {
+              try {
+                $st = gh run view $c.run_id --repo $env:GITHUB_REPOSITORY --json status --jq .status 2>$null
+                if ($LASTEXITCODE -eq 0 -and $st -eq 'completed') {
+                  Write-Host "Execução antiga $($c.run_id) já terminou; ignorando o estado antigo."
+                  $ativo = $false
+                }
+              } catch { }
+            }
+            if ($ativo) {
               Write-Error "Já existe um PC ativo (run $($c.run_id), IP $($c.ip)). Use 'desligar' antes ou 'migrar'."
               exit 1
             }
@@ -398,18 +418,6 @@ jobs:
             if (-not $b) { Write-Error 'Não há backup para restaurar.'; exit 1 }
           }
 
-      - name: Criar usuário Rafael e habilitar RDP
-        shell: pwsh
-        run: |
-          $sec = ConvertTo-SecureString $env:RDP_SENHA -AsPlainText -Force
-          New-LocalUser -Name 'Rafael' -Password $sec -FullName 'Rafael' -PasswordNeverExpires -AccountNeverExpires | Out-Null
-          Add-LocalGroupMember -Group 'Administrators' -Member 'Rafael'
-          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'Rafael'
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
-          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
-          Set-Service -Name TermService -StartupType Automatic
-          Start-Service -Name TermService
-          # Cria o perfil do usuário agora, para a restauração cair no lugar certo
-          try {
-            $cred = New-Object System.Management.Automation.PSCredential('.\Rafael', $sec)
-            Start-Process -FilePath cmd.exe -ArgumentList '/c exit 0' -Credential $cred -LoadUserProfile -WorkingDirectory 'C
+      # ===== COLE AQUI O RESTANTE DO ARQUIVO ORIGINAL =====
+      # O arquivo que recebi veio cortado no passo "Criar usuário Rafael e habilitar RDP".
+      # Copie desse passo em diante 
