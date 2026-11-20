@@ -7,7 +7,7 @@ on:
         description: Ação
         type: choice
         default: ligar
-        options: [ligar, restaurar, desligar, backup, status, destruir]
+        options: [ligar, restaurar, desligar, backup, migrar, status, destruir]
       runner:
         description: Tipo de runner
         type: choice
@@ -21,6 +21,14 @@ on:
         description: Nome na rede Tailscale
         type: string
         default: pc-github
+      migrar_aos:
+        description: Minuto em que inicia a migração (290 = 4h50)
+        type: string
+        default: "290"
+      origem_run:
+        description: "Uso interno: deixe vazio"
+        type: string
+        default: ""
       confirmar_destruir:
         description: Para destruir, escreva DESTRUIR
         type: string
@@ -28,7 +36,7 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  actions: write
 
 env:
   REMOTE: "armazenamento:pc-gamer"
@@ -37,7 +45,7 @@ env:
 
 jobs:
   controle:
-    if: ${{ inputs.acao == 'status' || inputs.acao == 'desligar' || inputs.acao == 'backup' || inputs.acao == 'destruir' }}
+    if: ${{ inputs.acao == 'status' || inputs.acao == 'desligar' || inputs.acao == 'backup' || inputs.acao == 'migrar' || inputs.acao == 'destruir' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -67,7 +75,7 @@ jobs:
           send() {
             id="$(date +%s)-$RANDOM"
             echo "{\"id\":\"$id\",\"acao\":\"$1\"}" | rclone rcat "$R/state/command.json"
-            end=$(( $(date +%s) + 1800 ))
+            end=$(( $(date +%s) + 2700 ))
             while [ "$(date +%s)" -lt "$end" ]; do
               a="$(get ack)"
               if [ -n "$a" ] && [ "$(echo "$a" | jq -r .id)" = "$id" ]; then
@@ -85,7 +93,7 @@ jobs:
                 alive && echo ">> PC ATIVO" || echo ">> PC não está ativo"
               fi
               get last_backup | jq . 2>/dev/null || echo "Nenhum backup." ;;
-            backup|desligar)
+            backup|desligar|migrar)
               alive || { echo "Nenhum PC ativo. Use 'ligar'."; exit 1; }
               send "$ACAO" ;;
             destruir)
@@ -108,6 +116,8 @@ jobs:
       RUNNER_TIPO: ${{ inputs.runner }}
       MINUTOS: ${{ inputs.minutos }}
       NOME_PC: ${{ inputs.nome_pc }}
+      MIGRAR_AOS: ${{ inputs.migrar_aos }}
+      ORIGEM_RUN: ${{ inputs.origem_run }}
     steps:
       - name: Preparar (validar, rclone e funções)
         shell: pwsh
@@ -118,6 +128,8 @@ jobs:
           echo "::add-mask::$env:TS_KEY"
           $m = 0
           if (-not [int]::TryParse($env:MINUTOS, [ref]$m) -or $m -lt 1 -or $m -gt 340) { Write-Error 'minutos deve ser entre 1 e 340.'; exit 1 }
+          $g = 0
+          if (-not [int]::TryParse($env:MIGRAR_AOS, [ref]$g) -or $g -lt 10 -or $g -gt 330) { Write-Error 'migrar_aos deve ser entre 10 e 330.'; exit 1 }
           $st = if ($env:CFG_TXT -or $env:CFG_B64) { '1' } else { '0' }
           if ($st -eq '0') { Write-Host '::warning::Sem RCLONE_CONFIG: o PC liga normalmente, mas SEM backup.' }
           @("RDP_SENHA=$senha", "STORAGE=$st", "START_EPOCH=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())") | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -166,11 +178,6 @@ jobs:
               [pscustomobject]@{ Local = $_; Name = (($_ -replace '^[A-Za-z]:\\', '') -replace '[\\ :]', '_') }
             }
           }
-          function Get-RemoteBytes {
-            $j = & $script:rc --config $script:conf size --json "$($script:remote)/data" 2>$null
-            if ($LASTEXITCODE -ne 0) { return -1 }
-            return [int64](($j -join '' | ConvertFrom-Json).bytes)
-          }
           function Invoke-Backup {
             $ok = $true; $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
             foreach ($p in Get-Paths) {
@@ -182,22 +189,11 @@ jobs:
             RC delete "$($script:remote)/_lixeira" --min-age 7d -q
             return $ok
           }
-          function Test-Backup {
-            $ok = $true
-            foreach ($p in Get-Paths) {
-              if (-not (Test-Path $p.Local)) { continue }
-              RC check $p.Local "$($script:remote)/data/$($p.Name)" --one-way --size-only --exclude-from $script:excl -q
-              if ($LASTEXITCODE -ne 0) { $ok = $false }
-            }
-            return $ok
-          }
           function Save-BackupInfo($v) {
             $script:lastBackup = (Get-Date).ToUniversalTime().ToString('o')
-            [void](Put-State 'last_backup' @{ em = $script:lastBackup; bytes = (Get-RemoteBytes); verificado = [bool]$v })
+            [void](Put-State 'last_backup' @{ em = $script:lastBackup })
           }
           function Invoke-Restore {
-            $need = Get-RemoteBytes; $free = (Get-PSDrive C).Free
-            if ($need -gt 0 -and $free -lt ($need * 1.1 + 2GB)) { Log 'Espaço insuficiente para restaurar.'; return $false }
             $ok = $true
             foreach ($p in Get-Paths) {
               New-Item -ItemType Directory -Force $p.Local | Out-Null
@@ -219,7 +215,7 @@ jobs:
       - name: Verificar se já existe PC ativo
         shell: pwsh
         run: |
-          if ($env:STORAGE -ne '1') { Write-Host 'Nada a verificar.'; exit 0 }
+          if ($env:STORAGE -ne '1' -or $env:ORIGEM_RUN) { Write-Host 'Nada a verificar.'; exit 0 }
           . 'C:\pc\lib.ps1'
           $c = Get-State 'current'
           if ($c -and $c.status -ne 'desligado') {
@@ -254,12 +250,32 @@ jobs:
           } catch { Write-Host "Perfil (melhor esforço): $($_.Exception.Message)" }
           exit 0
 
-      - name: Restaurar dados
-        if: ${{ inputs.acao == 'restaurar' }}
+      - name: Restaurar dados (restaurar ou nova máquina da migração)
+        if: ${{ inputs.acao == 'restaurar' || inputs.origem_run != '' }}
         shell: pwsh
         run: |
           . 'C:\pc\lib.ps1'
-          if (-not (Invoke-Restore)) { Write-Error 'A restauração falhou.'; exit 1 }
+          $mig = [bool]$env:ORIGEM_RUN
+          if (-not (Invoke-Restore)) {
+            if ($mig) { Write-Host '::warning::Restauração inicial incompleta; refaço na sincronização final.' }
+            else { Write-Error 'A restauração falhou.'; exit 1 }
+          }
+          if ($mig) {
+            [void](Put-State 'novo_pronto' @{ origem = "$env:ORIGEM_RUN" })
+            Log 'Novo PC pronto. Aguardando a máquina antiga fazer o backup final...'
+            $lim = (Get-Date).AddMinutes(40)
+            while ((Get-Date) -lt $lim) {
+              $c = Get-State 'current'
+              if (-not $c -or "$($c.run_id)" -ne "$env:ORIGEM_RUN" -or $c.status -in 'migrando', 'desligado') { break }
+              if (((Get-Date).ToUniversalTime() - ([datetimeoffset]$c.last_seen).UtcDateTime).TotalMinutes -ge 15) { break }
+              Start-Sleep 15
+            }
+            Log 'Sincronização final dos arquivos...'
+            foreach ($p in Get-Paths) {
+              New-Item -ItemType Directory -Force $p.Local | Out-Null
+              RC copy "$($script:remote)/data/$($p.Name)" $p.Local --transfers 16 --checkers 16 --retries 3 -q
+            }
+          }
           exit 0
 
       - name: Conectar ao Tailscale e mostrar dados de acesso
@@ -285,14 +301,11 @@ jobs:
           "TS_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "TS_HOST=$nome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $esp = ($env:RDP_SENHA.ToCharArray() -join ' ')
-          Write-Host '============================================='
           Write-Host "Nome na rede : $nome"
           Write-Host "Endereço IP  : $ip"
           Write-Host 'Usuário      : Rafael'
           Write-Host "Senha        : $esp   (digite sem os espaços)"
           Write-Host "Comando RDP  : mstsc /v:$ip"
-          Write-Host '============================================='
-          @('## PC remoto pronto', '', "- Nome: ``$nome``", "- IP: ``$ip``", '- Usuário: ``Rafael``', "- Senha: ``$env:RDP_SENHA``") | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           exit 0
 
       - name: Manter o PC ligado (backup e comandos)
@@ -304,6 +317,13 @@ jobs:
           $fim = [int64]$env:START_EPOCH + [int]$env:MINUTOS * 60
           if ($env:STORAGE -ne '1') { while ((Agora) -lt $fim) { Start-Sleep 60 }; exit 0 }
           $intervalo = [int]$env:INTERVALO_BACKUP_MIN * 60
+          $migraEm = [int64]$env:START_EPOCH + [int]$env:MIGRAR_AOS * 60
+          $migrando = $false; $ackMig = ''
+          function Iniciar-Migracao {
+            $wf = [IO.Path]::GetFileName(($env:GITHUB_WORKFLOW_REF -split '@')[0])
+            gh workflow run $wf --repo $env:GITHUB_REPOSITORY --ref $env:GITHUB_REF_NAME -f acao=ligar -f runner=$env:RUNNER_TIPO -f minutos=$env:MINUTOS -f nome_pc=$env:NOME_PC -f migrar_aos=$env:MIGRAR_AOS -f origem_run=$env:GITHUB_RUN_ID 2>&1 | Out-Host
+            return ($LASTEXITCODE -eq 0)
+          }
           function Ack($id, $ok, $msg) { [void](Put-State 'ack' @{ id = "$id"; ok = [bool]$ok; msg = $msg }) }
           function Rodar-Job($fn, $st) {
             $job = Start-Job -ScriptBlock { param($f) . 'C:\pc\lib.ps1'; $r = & $f; [bool]$r } -ArgumentList $fn
@@ -314,41 +334,58 @@ jobs:
             return [bool]$res[-1]
           }
           function Encerrar($id) {
-            Log 'Backup final...'
             $b = Rodar-Job 'Invoke-Backup' 'encerrando'
-            $v = $false
-            if ($b) { $v = Rodar-Job 'Test-Backup' 'encerrando' }
-            Save-BackupInfo $v
+            Save-BackupInfo $b
             Update-Heartbeat 'desligado'
             & $ts logout 2>&1 | Out-Null
             if ($id) { Ack $id $b 'PC desligado' }
-            Log 'PC desligado.'
+            exit 0
+          }
+          function Entregar($id) {
+            $b = Rodar-Job 'Invoke-Backup' 'entregando'
+            Save-BackupInfo $b
+            Update-Heartbeat 'migrando'
+            & $ts logout 2>&1 | Out-Null
+            if ($id) { Ack $id $b 'Migração concluída' }
             exit 0
           }
           $c0 = Get-State 'command'
           $ultimo = if ($c0) { "$($c0.id)" } else { '' }
           Update-Heartbeat 'ligado'
           $ub = Agora
-          Log "PC ligado por $env:MINUTOS min."
           while ($true) {
             $a = Agora
             Update-Heartbeat 'ligado'
             $c = Get-State 'command'
             if ($c -and "$($c.id)" -ne $ultimo) {
               $ultimo = "$($c.id)"
-              Log "Comando: $($c.acao)"
               if ($c.acao -eq 'backup') {
                 $b = Rodar-Job 'Invoke-Backup' 'backup'
                 Save-BackupInfo $b; $ub = Agora
                 Ack $c.id $b 'Backup concluído'
               } elseif ($c.acao -eq 'desligar') { Encerrar $c.id }
+              elseif ($c.acao -eq 'migrar') {
+                if (-not $migrando) {
+                  $migrando = Iniciar-Migracao
+                  if ($migrando) { $ackMig = "$($c.id)" } else { Ack $c.id $false 'Falha ao iniciar a nova máquina' }
+                } else { $ackMig = "$($c.id)" }
+              }
+            }
+            if (-not $migrando -and $a -ge $migraEm) {
+              $migrando = Iniciar-Migracao
+              if (-not $migrando) { $migraEm = $a + 600 }
+            }
+            if ($migrando) {
+              $np = Get-State 'novo_pronto'
+              if ($np -and "$($np.origem)" -eq "$env:GITHUB_RUN_ID") { Entregar $ackMig }
             }
             if (($a - $ub) -ge $intervalo) {
               $b = Rodar-Job 'Invoke-Backup' 'backup'
               if ($b) { Save-BackupInfo $false }
               $ub = Agora
             }
-            if ($a -ge $fim) { Encerrar '' }
+            $lf = if ($migrando) { $fim + 600 } else { $fim }
+            if ($a -ge $lf) { Encerrar $ackMig }
             Start-Sleep 20
           }
           
