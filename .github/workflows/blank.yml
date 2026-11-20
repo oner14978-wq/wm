@@ -417,7 +417,10 @@ jobs:
             $b = Get-State 'last_backup'
             if (-not $b) { Write-Error 'Não há backup para restaurar.'; exit 1 }
           }
+          exit 0
 
-      # ===== COLE AQUI O RESTANTE DO ARQUIVO ORIGINAL =====
-      # O arquivo que recebi veio cortado no passo "Criar usuário Rafael e habilitar RDP".
-      # Copie desse passo em diante 
+      - name: Criar usuário Rafael e habilitar RDP
+        shell: pwsh
+        run: |
+          $sec = ConvertTo-SecureString $env:RDP_SENHA -AsPlainText -Force
+          
