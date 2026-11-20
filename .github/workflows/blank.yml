@@ -307,7 +307,7 @@ jobs:
           Write-Host "Senha        : $esp   (digite sem os espaços)"
           Write-Host "Comando RDP  : mstsc /v:$ip"
           Write-Host "::notice title=PC remoto pronto::IP: $ip | Usuário: Rafael | Senha: $esp (sem espaços) | Nome: $nome"
-          @('## PC remoto pronto', '', "- IP (código de acesso): ``$ip``", '- Usuário: ``Rafael``', "- Senha: ``$env:RDP_SENHA``", "- Nome na rede: ``$nome``") | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          @('## PC remoto pronto', '', "- IP (código de acesso): ``$ip``", '- Usuário: ``Rafael``', "- Senha: ``$esp`` (digite sem os espaços)", "- Nome na rede: ``$nome``") | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           exit 0
 
       - name: Manter o PC ligado (backup e comandos)
