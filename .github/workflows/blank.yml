@@ -306,6 +306,8 @@ jobs:
           Write-Host 'Usuário      : Rafael'
           Write-Host "Senha        : $esp   (digite sem os espaços)"
           Write-Host "Comando RDP  : mstsc /v:$ip"
+          Write-Host "::notice title=PC remoto pronto::IP: $ip | Usuário: Rafael | Senha: $esp (sem espaços) | Nome: $nome"
+          @('## PC remoto pronto', '', "- IP (código de acesso): ``$ip``", '- Usuário: ``Rafael``', "- Senha: ``$env:RDP_SENHA``", "- Nome na rede: ``$nome``") | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           exit 0
 
       - name: Manter o PC ligado (backup e comandos)
@@ -313,6 +315,7 @@ jobs:
         run: |
           . 'C:\pc\lib.ps1'
           $ts = 'C:\Program Files\Tailscale\tailscale.exe'
+          Write-Host "ACESSO >> IP: $env:TS_IP | Usuário: Rafael | Senha: $($env:RDP_SENHA.ToCharArray() -join ' ') (sem espaços)"
           function Agora { [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
           $fim = [int64]$env:START_EPOCH + [int]$env:MINUTOS * 60
           if ($env:STORAGE -ne '1') { while ((Agora) -lt $fim) { Start-Sleep 60 }; exit 0 }
