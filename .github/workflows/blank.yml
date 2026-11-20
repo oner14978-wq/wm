@@ -9,7 +9,7 @@ on:
         default: windows-11-arm
         options:
           - windows-11-arm
-          - windows-l1-arm
+          - windows-11-arm
       minutos:
         description: "Minutos ligado (máx. 340)"
         type: string
@@ -31,14 +31,9 @@ jobs:
         shell: pwsh
         env:
           TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           if (-not $env:TS_KEY -or -not $env:TS_KEY.StartsWith('tskey-auth-')) {
             Write-Error 'Secret TAILSCALE_AUTH_KEY ausente ou inválido.'
-            exit 1
-          }
-          if (-not $env:RDP_PASSWORD) {
-            Write-Error 'Secret RDP_PASSWORD ausente.'
             exit 1
           }
           $m = 0
@@ -49,11 +44,9 @@ jobs:
 
       - name: Criar usuário Rafael e habilitar RDP
         shell: pwsh
-        env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          echo "::add-mask::$env:RDP_PASSWORD"
-          $sec = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          $senha = 'Gamer2026Abc'
+          $sec = ConvertTo-SecureString $senha -AsPlainText -Force
           New-LocalUser -Name 'Rafael' -Password $sec -FullName 'Rafael' -PasswordNeverExpires -AccountNeverExpires | Out-Null
           Add-LocalGroupMember -Group 'Administrators' -Member 'Rafael'
           Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'Rafael'
@@ -103,13 +96,13 @@ jobs:
         run: |
           Write-Host "=========================================="
           Write-Host "Conta do Windows: Rafael"
-          Write-Host "Senha: a do secret RDP_PASSWORD"
+          Write-Host "Senha da conta do Windows: Gamer2026Abc"
           Write-Host "Codigo de acesso (IP Tailscale): $env:TS_IP"
           Write-Host "=========================================="
           @(
             "## ✅ PC remoto no ar",
             "- Conta do Windows: **Rafael**",
-            "- Senha: a do secret ``RDP_PASSWORD``",
+            "- Senha da conta do Windows: ``Gamer2026Abc``",
             "- Código de acesso (IP Tailscale): ``$env:TS_IP``"
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
