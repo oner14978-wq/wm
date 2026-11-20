@@ -1,0 +1,110 @@
+name: Windows Remoto no GitHub (Tailscale + RDP)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Tipo de runner"
+        type: choice
+        default: windows-11-arm
+        options:
+          - windows-11-arm
+          - windows-11-arm
+      minutos:
+        description: "Minutos ligado (máx. 340)"
+        type: string
+        default: "300"
+      nome_pc:
+        description: "Nome na rede Tailscale"
+        type: string
+        default: pc-github
+
+permissions:
+  contents: read
+
+jobs:
+  pc:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 355
+    steps:
+      - name: Validar entradas
+        shell: pwsh
+        env:
+          TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          if (-not $env:TS_KEY -or -not $env:TS_KEY.StartsWith('tskey-auth-')) {
+            Write-Error 'Secret TAILSCALE_AUTH_KEY ausente ou inválido.'
+            exit 1
+          }
+          $m = 0
+          if (-not [int]::TryParse('${{ inputs.minutos }}', [ref]$m) -or $m -lt 1 -or $m -gt 340) {
+            Write-Error 'minutos deve ser entre 1 e 340.'
+            exit 1
+          }
+
+      - name: Criar usuário Rafael e habilitar RDP
+        shell: pwsh
+        run: |
+          $senha = 'Gamer2026Abc'
+          $sec = ConvertTo-SecureString $senha -AsPlainText -Force
+          New-LocalUser -Name 'Rafael' -Password $sec -FullName 'Rafael' -PasswordNeverExpires -AccountNeverExpires | Out-Null
+          Add-LocalGroupMember -Group 'Administrators' -Member 'Rafael'
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'Rafael'
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
+
+      - name: Instalar Tailscale e conectar
+        shell: pwsh
+        env:
+          TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          echo "::add-mask::$env:TS_KEY"
+          $arch = if ('${{ inputs.runner }}' -eq 'windows-11-arm') { 'arm64' } else { 'amd64' }
+          $msi = Join-Path $env:TEMP 'tailscale.msi'
+          Invoke-WebRequest -UseBasicParsing -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-$arch.msi" -OutFile $msi
+          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
+          Start-Sleep -Seconds 15
+          $ts = 'C:\Program Files\Tailscale\tailscale.exe'
+          for ($i = 1; $i -le 5; $i++) {
+            & $ts up --auth-key="$env:TS_KEY" --hostname='${{ inputs.nome_pc }}' --accept-routes
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep -Seconds 10
+          }
+
+      - name: IP
+        shell: pwsh
+        run: |
+          $ts = 'C:\Program Files\Tailscale\tailscale.exe'
+          $ip = $null
+          for ($i = 1; $i -le 10 -and -not $ip; $i++) {
+            $ip = (& $ts ip -4 | Select-Object -First 1)
+            if (-not $ip) { Start-Sleep -Seconds 5 }
+          }
+          if (-not $ip) { Write-Error 'Não foi possível obter o IP do Tailscale.'; exit 1 }
+          Write-Host "IP do Tailscale: $ip"
+          "TS_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Mostrar acesso
+        shell: pwsh
+        run: |
+          Write-Host "=========================================="
+          Write-Host "Conta do Windows: Rafael"
+          Write-Host "Senha da conta do Windows: Gamer2026Abc"
+          Write-Host "Codigo de acesso (IP Tailscale): $env:TS_IP"
+          Write-Host "=========================================="
+          @(
+            "## ✅ PC remoto no ar",
+            "- Conta do Windows: **Rafael**",
+            "- Senha da conta do Windows: ``Gamer2026Abc``",
+            "- Código de acesso (IP Tailscale): ``$env:TS_IP``"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Manter o PC ligado
+        shell: pwsh
+        run: |
+          $fim = (Get-Date).AddMinutes([int]'${{ inputs.minutos }}')
+          while ((Get-Date) -lt $fim) { Start-Sleep -Seconds 60 }
+          Write-Host 'Tempo esgotado. Encerrando.'
+          
