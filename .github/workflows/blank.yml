@@ -78,7 +78,7 @@ jobs:
           Expand-Archive 'C:\pc\rclone.zip' -DestinationPath 'C:\pc\rc' -Force
           Copy-Item (Get-ChildItem 'C:\pc\rc' -Recurse -Filter rclone.exe | Select-Object -First 1).FullName 'C:\pc\rclone.exe'
           if ($env:CFG_TXT) { [IO.File]::WriteAllText('C:\pc\rclone.conf', ($env:CFG_TXT.Trim() + "`n")) }
-          else { [IO.File]::WriteAllBytes('C:\pc\rclone.conf', [Convert]::FromBase64String($env:CFG_B64)) }
+          else { [IO.File]::WriteAllBytes('C:\pc\rclone.conf', [Convert]::FromBase64String(($env:CFG_B64 -replace '\s', ''))) }
           $t = (& 'C:\pc\rclone.exe' --config 'C:\pc\rclone.conf' mkdir $env:REMOTE 2>&1 | Out-String)
           if ($LASTEXITCODE -ne 0) { Write-Error "Salvamento não funciona. Erro: $t Confira o secret RCLONE_CONFIG ([armazenamento])."; exit 1 }
           }
