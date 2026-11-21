@@ -40,7 +40,7 @@ permissions:
 
 env:
   REMOTE: "armazenamento:pc-gamer"
-  BACKUP_PATHS: 'C:\Users\Rafael;C:\Games;C:\Users\Public;C:\ProgramData;C:\Program Files;C:\Program Files (x86)'
+  BACKUP_PATHS: 'C:\Users\Rafael;C:\Games;C:\Users\Public;C:\ProgramData;C:\Program Files;C:\Program Files (x86);C:\Users\Rafael\AppData\Local\Packages\Microsoft.GamingApp_8wekyb3d8bbwe;C:\Users\Rafael\AppData\Local\Packages\Microsoft.XboxGamingOverlay_8wekyb3d8bbwe;C:\Users\Rafael\AppData\Local\Packages\Microsoft.XboxIdentityProvider_8wekyb3d8bbwe'
   INTERVALO_BACKUP_MIN: "10"
 
 jobs:
@@ -393,9 +393,4 @@ jobs:
           try { $j = ((& $ts status --json) -join "`n") | ConvertFrom-Json; if ($j.Self.HostName) { $nome = $j.Self.HostName } } catch { }
           "TS_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "TS_HOST=$nome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          $esp = ($env:RDP_SENHA.ToCharArray() -join ' ')
-          Write-Host "Nome na rede : $nome"
-          Write-Host "Endereço IP  : $ip"
-          Write-Host 'Usuário      : Rafael'
-          Write-Host "Senha        : $esp   (digite sem os espaços)"
-          Write-Host "Com
+          $esp = ($env:RDP_SENHA.ToCharArray(
