@@ -354,7 +354,9 @@ jobs:
             }
             $lf = if ($migrando) { $fim + 600 } else { $fim }
             if ($a -ge $lf) { Encerrar $ackMig }
-            Start-Sleep 20 $script:rc = 'C:\pc\rclone.exe'; $script:conf = 'C:\pc\rclone.conf'; $script:remote = $env:REMOTE
+            Start-Sleep 20
+          }
+          $script:rc = 'C:\pc\rclone.exe'; $script:conf = 'C:\pc\rclone.conf'; $script:remote = $env:REMOTE
 $script:excl = 'C:\pc\exclude.txt'; $script:lastBackup = ''
 $script:temaArq = 'C:\Users\Rafael\tema-windows.json'
 $script:temaChave = 'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
