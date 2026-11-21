@@ -119,6 +119,8 @@ jobs:
       MIGRAR_AOS: ${{ inputs.migrar_aos }}
       ORIGEM_RUN: ${{ inputs.origem_run }}
     steps:
+      - name: Baixar arquivos do repositório
+        uses: actions/checkout@v4
       - name: Preparar (validar, rclone e funções)
         shell: pwsh
         run: |
@@ -170,137 +172,7 @@ jobs:
           /Microsoft*/**
           /rclone*/**
           '@ | Set-Content 'C:\pc\exclude.txt' -Encoding ascii
-          @'
-          $script:rc = 'C:\pc\rclone.exe'; $script:conf = 'C:\pc\rclone.conf'; $script:remote = $env:REMOTE
-          $script:excl = 'C:\pc\exclude.txt'; $script:lastBackup = ''
-          $script:temaArq = 'C:\Users\Rafael\tema-windows.json'
-          $script:temaChave = 'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
-          $script:temaVals = @('AppsUseLightTheme', 'SystemUsesLightTheme', 'EnableTransparency', 'ColorPrevalence')
-          function Log($m) { Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) }
-          function RC { & $script:rc --config $script:conf @args 2>&1 | Out-Host }
-          function Put-State($n, $o) {
-            ($o | ConvertTo-Json -Depth 5 -Compress) | & $script:rc --config $script:conf rcat "$($script:remote)/state/$n.json" 2>$null
-            return ($LASTEXITCODE -eq 0)
-          }
-          function Get-State($n) {
-            $t = & $script:rc --config $script:conf cat "$($script:remote)/state/$n.json" 2>$null
-            if ($LASTEXITCODE -ne 0 -or -not $t) { return $null }
-            try { return (($t -join "`n") | ConvertFrom-Json) } catch { return $null }
-          }
-          function Get-Paths {
-            $env:BACKUP_PATHS -split ';' | Where-Object { $_ } | ForEach-Object {
-              [pscustomobject]@{ Local = $_; Name = (($_ -replace '^[A-Za-z]:\\', '') -replace '[\\ :]', '_') }
-            }
-          }
-          function Open-HiveRafael {
-            $sid = $null
-            try { $sid = (New-Object System.Security.Principal.NTAccount('Rafael')).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { }
-            if ($sid -and (Test-Path "Registry::HKEY_USERS\$sid")) { return @{ Raiz = "HKU\$sid"; Carregado = $false } }
-            if (-not (Test-Path 'C:\Users\Rafael\NTUSER.DAT')) { return $null }
-            & reg.exe load HKU\RafaelTmp 'C:\Users\Rafael\NTUSER.DAT' 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) { return $null }
-            return @{ Raiz = 'HKU\RafaelTmp'; Carregado = $true }
-          }
-          function Close-HiveRafael($h) {
-            if ($h -and $h.Carregado) { [gc]::Collect(); Start-Sleep 1; & reg.exe unload HKU\RafaelTmp 2>&1 | Out-Null }
-          }
-          function Save-Tema {
-            try {
-              $h = Open-HiveRafael
-              if (-not $h) { return }
-              $o = @{}
-              foreach ($v in $script:temaVals) {
-                $q = (& reg.exe query "$($h.Raiz)\$($script:temaChave)" /v $v 2>$null | Out-String)
-                if ($q -match 'REG_DWORD\s+0x([0-9a-fA-F]+)') { $o[$v] = [Convert]::ToInt32($Matches[1], 16) }
-              }
-              if ($o.Count -gt 0 -and (Test-Path 'C:\Users\Rafael')) {
-                ($o | ConvertTo-Json -Compress) | Set-Content $script:temaArq -Encoding ascii
-              }
-              Close-HiveRafael $h
-            } catch { Log "Tema (melhor esforço): $($_.Exception.Message)" }
-          }
-          function Restore-Tema {
-            try {
-              if (-not (Test-Path $script:temaArq)) { return }
-              $o = Get-Content $script:temaArq -Raw | ConvertFrom-Json
-              $h = Open-HiveRafael
-              if (-not $h) { return }
-              foreach ($p in $o.PSObject.Properties) {
-                & reg.exe add "$($h.Raiz)\$($script:temaChave)" /v $p.Name /t REG_DWORD /d ([int]$p.Value) /f 2>&1 | Out-Null
-              }
-              Close-HiveRafael $h
-            } catch { Log "Tema (melhor esforço): $($_.Exception.Message)" }
-          }
-          $script:regDir = 'C:\Users\Rafael\registro-jogos'
-          function Save-RegJogos {
-            try {
-              $h = Open-HiveRafael
-              if (-not $h) { return }
-              New-Item -ItemType Directory -Force $script:regDir | Out-Null
-              Remove-Item (Join-Path $script:regDir '*.reg') -Force -ErrorAction SilentlyContinue
-              $ign = @('Microsoft', 'Classes', 'Policies', 'Tailscale')
-              $subs = @(& reg.exe query "$($h.Raiz)\Software" 2>$null | Where-Object { $_ -match '^HKEY_USERS\\.+\\Software\\[^\\]+$' })
-              foreach ($l in $subs) {
-                $n = $l.Substring($l.LastIndexOf('\') + 1)
-                if ($ign -contains $n) { continue }
-                $f = Join-Path $script:regDir (($n -replace '[^\w\.-]', '_') + '.reg')
-                & reg.exe export $l $f /y 2>&1 | Out-Null
-              }
-              Close-HiveRafael $h
-            } catch { Log "Registro de jogos (melhor esforço): $($_.Exception.Message)" }
-          }
-          function Restore-RegJogos {
-            try {
-              if (-not (Test-Path $script:regDir)) { return }
-              $h = Open-HiveRafael
-              if (-not $h) { return }
-              $raiz = 'HKEY_USERS\' + ($h.Raiz -replace '^HKU\\', '')
-              foreach ($f in Get-ChildItem $script:regDir -Filter *.reg -ErrorAction SilentlyContinue) {
-                $t = [IO.File]::ReadAllText($f.FullName, [Text.Encoding]::Unicode)
-                $t = [regex]::Replace($t, 'HKEY_USERS\\[^\\\]\r\n]+', { param($m) $raiz })
-                $tmp = 'C:\pc\reg-import.reg'
-                [IO.File]::WriteAllText($tmp, $t, [Text.Encoding]::Unicode)
-                & reg.exe import $tmp 2>&1 | Out-Null
-              }
-              Close-HiveRafael $h
-            } catch { Log "Registro de jogos (melhor esforço): $($_.Exception.Message)" }
-          }
-          function Invoke-Backup {
-            $ok = $true; $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-            Save-Tema
-            Save-RegJogos
-            foreach ($p in Get-Paths) {
-              if (-not (Test-Path $p.Local)) { continue }
-              if (-not (Get-ChildItem $p.Local -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) { continue }
-              RC sync $p.Local "$($script:remote)/data/$($p.Name)" --exclude-from $script:excl --backup-dir "$($script:remote)/_lixeira/$stamp/$($p.Name)" --transfers 8 --checkers 16 --retries 3 -q
-              if ($LASTEXITCODE -ne 0) { Log "Falha no backup de $($p.Local)"; $ok = $false }
-            }
-            RC delete "$($script:remote)/_lixeira" --min-age 7d -q
-            return $ok
-          }
-          function Save-BackupInfo($v) {
-            $script:lastBackup = (Get-Date).ToUniversalTime().ToString('o')
-            [void](Put-State 'last_backup' @{ em = $script:lastBackup })
-          }
-          function Invoke-Restore {
-            $ok = $true
-            foreach ($p in Get-Paths) {
-              New-Item -ItemType Directory -Force $p.Local | Out-Null
-              RC copy "$($script:remote)/data/$($p.Name)" $p.Local --transfers 16 --checkers 16 --retries 3 -q
-              if ($LASTEXITCODE -ne 0) { $ok = $false; Log "Falha ao restaurar $($p.Local)" }
-            }
-            Restore-Tema
-            Restore-RegJogos
-            return $ok
-          }
-          function Update-Heartbeat($status) {
-            [void](Put-State 'current' @{
-              run_id = "$env:GITHUB_RUN_ID"; host = $env:TS_HOST; ip = $env:TS_IP
-              last_seen = (Get-Date).ToUniversalTime().ToString('o'); status = $status
-              last_backup = $script:lastBackup; usuario = 'Rafael'
-            })
-          }
-          '@ | Set-Content 'C:\pc\lib.ps1' -Encoding utf8
+          Copy-Item "$env:GITHUB_WORKSPACE\.github\scripts\lib.ps1" 'C:\pc\lib.ps1' -Force
           exit 0
 
       - name: Verificar se já existe PC ativo
@@ -341,7 +213,7 @@ jobs:
           } catch { Write-Host "Perfil (melhor esforço): $($_.Exception.Message)" }
           exit 0
 
-                - name: Restaurar dados (restaurar ou nova máquina da migração)
+      - name: Restaurar dados (restaurar ou nova máquina da migração)
         if: ${{ inputs.acao == 'restaurar' || inputs.origem_run != '' }}
         shell: pwsh
         run: |
@@ -482,6 +354,132 @@ jobs:
             }
             $lf = if ($migrando) { $fim + 600 } else { $fim }
             if ($a -ge $lf) { Encerrar $ackMig }
-            Start-Sleep 20
-          }
-          
+            Start-Sleep 20 $script:rc = 'C:\pc\rclone.exe'; $script:conf = 'C:\pc\rclone.conf'; $script:remote = $env:REMOTE
+$script:excl = 'C:\pc\exclude.txt'; $script:lastBackup = ''
+$script:temaArq = 'C:\Users\Rafael\tema-windows.json'
+$script:temaChave = 'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+$script:temaVals = @('AppsUseLightTheme', 'SystemUsesLightTheme', 'EnableTransparency', 'ColorPrevalence')
+function Log($m) { Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) }
+function RC { & $script:rc --config $script:conf @args 2>&1 | Out-Host }
+function Put-State($n, $o) {
+  ($o | ConvertTo-Json -Depth 5 -Compress) | & $script:rc --config $script:conf rcat "$($script:remote)/state/$n.json" 2>$null
+  return ($LASTEXITCODE -eq 0)
+}
+function Get-State($n) {
+  $t = & $script:rc --config $script:conf cat "$($script:remote)/state/$n.json" 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $t) { return $null }
+  try { return (($t -join "`n") | ConvertFrom-Json) } catch { return $null }
+}
+function Get-Paths {
+  $env:BACKUP_PATHS -split ';' | Where-Object { $_ } | ForEach-Object {
+    [pscustomobject]@{ Local = $_; Name = (($_ -replace '^[A-Za-z]:\\', '') -replace '[\\ :]', '_') }
+  }
+}
+function Open-HiveRafael {
+  $sid = $null
+  try { $sid = (New-Object System.Security.Principal.NTAccount('Rafael')).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { }
+  if ($sid -and (Test-Path "Registry::HKEY_USERS\$sid")) { return @{ Raiz = "HKU\$sid"; Carregado = $false } }
+  if (-not (Test-Path 'C:\Users\Rafael\NTUSER.DAT')) { return $null }
+  & reg.exe load HKU\RafaelTmp 'C:\Users\Rafael\NTUSER.DAT' 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) { return $null }
+  return @{ Raiz = 'HKU\RafaelTmp'; Carregado = $true }
+}
+function Close-HiveRafael($h) {
+  if ($h -and $h.Carregado) { [gc]::Collect(); Start-Sleep 1; & reg.exe unload HKU\RafaelTmp 2>&1 | Out-Null }
+}
+function Save-Tema {
+  try {
+    $h = Open-HiveRafael
+    if (-not $h) { return }
+    $o = @{}
+    foreach ($v in $script:temaVals) {
+      $q = (& reg.exe query "$($h.Raiz)\$($script:temaChave)" /v $v 2>$null | Out-String)
+      if ($q -match 'REG_DWORD\s+0x([0-9a-fA-F]+)') { $o[$v] = [Convert]::ToInt32($Matches[1], 16) }
+    }
+    if ($o.Count -gt 0 -and (Test-Path 'C:\Users\Rafael')) {
+      ($o | ConvertTo-Json -Compress) | Set-Content $script:temaArq -Encoding ascii
+    }
+    Close-HiveRafael $h
+  } catch { Log "Tema (melhor esforço): $($_.Exception.Message)" }
+}
+function Restore-Tema {
+  try {
+    if (-not (Test-Path $script:temaArq)) { return }
+    $o = Get-Content $script:temaArq -Raw | ConvertFrom-Json
+    $h = Open-HiveRafael
+    if (-not $h) { return }
+    foreach ($p in $o.PSObject.Properties) {
+      & reg.exe add "$($h.Raiz)\$($script:temaChave)" /v $p.Name /t REG_DWORD /d ([int]$p.Value) /f 2>&1 | Out-Null
+    }
+    Close-HiveRafael $h
+  } catch { Log "Tema (melhor esforço): $($_.Exception.Message)" }
+}
+$script:regDir = 'C:\Users\Rafael\registro-jogos'
+function Save-RegJogos {
+  try {
+    $h = Open-HiveRafael
+    if (-not $h) { return }
+    New-Item -ItemType Directory -Force $script:regDir | Out-Null
+    Remove-Item (Join-Path $script:regDir '*.reg') -Force -ErrorAction SilentlyContinue
+    $ign = @('Microsoft', 'Classes', 'Policies', 'Tailscale')
+    $subs = @(& reg.exe query "$($h.Raiz)\Software" 2>$null | Where-Object { $_ -match '^HKEY_USERS\\.+\\Software\\[^\\]+$' })
+    foreach ($l in $subs) {
+      $n = $l.Substring($l.LastIndexOf('\') + 1)
+      if ($ign -contains $n) { continue }
+      $f = Join-Path $script:regDir (($n -replace '[^\w\.-]', '_') + '.reg')
+      & reg.exe export $l $f /y 2>&1 | Out-Null
+    }
+    Close-HiveRafael $h
+  } catch { Log "Registro de jogos (melhor esforço): $($_.Exception.Message)" }
+}
+function Restore-RegJogos {
+  try {
+    if (-not (Test-Path $script:regDir)) { return }
+    $h = Open-HiveRafael
+    if (-not $h) { return }
+    $raiz = 'HKEY_USERS\' + ($h.Raiz -replace '^HKU\\', '')
+    foreach ($f in Get-ChildItem $script:regDir -Filter *.reg -ErrorAction SilentlyContinue) {
+      $t = [IO.File]::ReadAllText($f.FullName, [Text.Encoding]::Unicode)
+      $t = [regex]::Replace($t, 'HKEY_USERS\\[^\\\]\r\n]+', { param($m) $raiz })
+      $tmp = 'C:\pc\reg-import.reg'
+      [IO.File]::WriteAllText($tmp, $t, [Text.Encoding]::Unicode)
+      & reg.exe import $tmp 2>&1 | Out-Null
+    }
+    Close-HiveRafael $h
+  } catch { Log "Registro de jogos (melhor esforço): $($_.Exception.Message)" }
+}
+function Invoke-Backup {
+  $ok = $true; $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+  Save-Tema
+  Save-RegJogos
+  foreach ($p in Get-Paths) {
+    if (-not (Test-Path $p.Local)) { continue }
+    if (-not (Get-ChildItem $p.Local -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) { continue }
+    RC sync $p.Local "$($script:remote)/data/$($p.Name)" --exclude-from $script:excl --backup-dir "$($script:remote)/_lixeira/$stamp/$($p.Name)" --transfers 8 --checkers 16 --retries 3 -q
+    if ($LASTEXITCODE -ne 0) { Log "Falha no backup de $($p.Local)"; $ok = $false }
+  }
+  RC delete "$($script:remote)/_lixeira" --min-age 7d -q
+  return $ok
+}
+function Save-BackupInfo($v) {
+  $script:lastBackup = (Get-Date).ToUniversalTime().ToString('o')
+  [void](Put-State 'last_backup' @{ em = $script:lastBackup })
+}
+function Invoke-Restore {
+  $ok = $true
+  foreach ($p in Get-Paths) {
+    New-Item -ItemType Directory -Force $p.Local | Out-Null
+    RC copy "$($script:remote)/data/$($p.Name)" $p.Local --transfers 16 --checkers 16 --retries 3 -q
+    if ($LASTEXITCODE -ne 0) { $ok = $false; Log "Falha ao restaurar $($p.Local)" }
+  }
+  Restore-Tema
+  Restore-RegJogos
+  return $ok
+}
+function Update-Heartbeat($status) {
+  [void](Put-State 'current' @{
+    run_id = "$env:GITHUB_RUN_ID"; host = $env:TS_HOST; ip = $env:TS_IP
+    last_seen = (Get-Date).ToUniversalTime().ToString('o'); status = $status
+    last_backup = $script:lastBackup; usuario = 'Rafael'
+  })
+}
