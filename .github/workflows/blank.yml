@@ -7,7 +7,7 @@ on:
         description: Ação
         type: choice
         default: ligar
-        options: [ligar, restaurar, desligar, backup, migrar, status, destruir]
+        options: [ligar, restaurar]
       runner:
         description: Tipo de runner
         type: choice
@@ -29,10 +29,6 @@ on:
         description: "Uso interno: deixe vazio"
         type: string
         default: ""
-      confirmar_destruir:
-        description: Para destruir, escreva DESTRUIR
-        type: string
-        default: ""
 
 permissions:
   contents: read
@@ -44,60 +40,349 @@ env:
   INTERVALO_BACKUP_MIN: "10"
 
 jobs:
-  controle:
-    if: ${{ inputs.acao == 'status' || inputs.acao == 'desligar' || inputs.acao == 'backup' || inputs.acao == 'migrar' || inputs.acao == 'destruir' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+  pc:
+    if: ${{ inputs.acao == 'ligar' || inputs.acao == 'restaurar' }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 355
     env:
+      TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
       CFG_TXT: ${{ secrets.RCLONE_CONFIG }}
       CFG_B64: ${{ secrets.RCLONE_CONFIG_B64 }}
+      GH_TOKEN: ${{ github.token }}
       ACAO: ${{ inputs.acao }}
-      CONFIRMAR: ${{ inputs.confirmar_destruir }}
+      RUNNER_TIPO: ${{ inputs.runner }}
+      MINUTOS: ${{ inputs.minutos }}
+      NOME_PC: ${{ inputs.nome_pc }}
+      MIGRAR_AOS: ${{ inputs.migrar_aos }}
+      ORIGEM_RUN: ${{ inputs.origem_run }}
     steps:
-      - name: Executar ação
-        shell: bash
+      - name: Preparar (validar, rclone e funções)
+        shell: pwsh
         run: |
-          set -uo pipefail
-          mkdir -p ~/.config/rclone
-          if [ -n "${CFG_TXT:-}" ]; then printf '%s\n' "$CFG_TXT" > ~/.config/rclone/rclone.conf
-          elif [ -n "${CFG_B64:-}" ]; then echo "$CFG_B64" | base64 -d > ~/.config/rclone/rclone.conf
-          else echo "Secret RCLONE_CONFIG ausente."; exit 1; fi
-          curl -fsSL https://rclone.org/install.sh | sudo bash >/dev/null 2>&1 || true
-          command -v rclone >/dev/null || { echo "Falha ao instalar rclone."; exit 1; }
-          R="$REMOTE"
-          get() { rclone cat "$R/state/$1.json" 2>/dev/null; }
-          alive() {
-            c="$(get current)"; [ -n "$c" ] || return 1
-            [ "$(echo "$c" | jq -r .status)" != "desligado" ] || return 1
-            age=$(( $(date +%s) - $(date -d "$(echo "$c" | jq -r .last_seen)" +%s) ))
-            [ "$age" -lt 900 ]
+          if (-not $env:TS_KEY -or -not $env:TS_KEY.StartsWith('tskey-auth-')) { Write-Error 'Secret TAILSCALE_AUTH_KEY ausente ou inválido.'; exit 1 }
+          $senha = if ($env:RDP_PASSWORD) { $env:RDP_PASSWORD } else { 'Gamer2026Abc' }
+          echo "::add-mask::$senha"
+          echo "::add-mask::$env:TS_KEY"
+          $m = 0
+          if (-not [int]::TryParse($env:MINUTOS, [ref]$m) -or $m -lt 1 -or $m -gt 340) { Write-Error 'minutos deve ser entre 1 e 340.'; exit 1 }
+          $g = 0
+          if (-not [int]::TryParse($env:MIGRAR_AOS, [ref]$g) -or $g -lt 10 -or $g -gt 330) { Write-Error 'migrar_aos deve ser entre 10 e 330.'; exit 1 }
+          $st = if ($env:CFG_TXT -or $env:CFG_B64) { '1' } else { '0' }
+          if ($st -eq '0') { Write-Host '::warning::Sem RCLONE_CONFIG: o PC liga normalmente, mas SEM backup.' }
+          @("RDP_SENHA=$senha", "STORAGE=$st", "START_EPOCH=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())") | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          New-Item -ItemType Directory -Force 'C:\pc' | Out-Null
+          if ($st -eq '1') {
+          $arch = if ($env:RUNNER_TIPO -eq 'windows-11-arm') { 'arm64' } else { 'amd64' }
+          Invoke-WebRequest -UseBasicParsing -Uri "https://downloads.rclone.org/rclone-current-windows-$arch.zip" -OutFile 'C:\pc\rclone.zip'
+          Expand-Archive 'C:\pc\rclone.zip' -DestinationPath 'C:\pc\rc' -Force
+          Copy-Item (Get-ChildItem 'C:\pc\rc' -Recurse -Filter rclone.exe | Select-Object -First 1).FullName 'C:\pc\rclone.exe'
+          if ($env:CFG_TXT) { [IO.File]::WriteAllText('C:\pc\rclone.conf', ($env:CFG_TXT.Trim() + "`n")) }
+          else { [IO.File]::WriteAllBytes('C:\pc\rclone.conf', [Convert]::FromBase64String($env:CFG_B64)) }
           }
-          send() {
-            id="$(date +%s)-$RANDOM"
-            echo "{\"id\":\"$id\",\"acao\":\"$1\"}" | rclone rcat "$R/state/command.json"
-            end=$(( $(date +%s) + 2700 ))
-            while [ "$(date +%s)" -lt "$end" ]; do
-              a="$(get ack)"
-              if [ -n "$a" ] && [ "$(echo "$a" | jq -r .id)" = "$id" ]; then
-                echo "$a" | jq .; [ "$(echo "$a" | jq -r .ok)" = "true" ]; return
-              fi
-              sleep 15
-            done
-            echo "Sem resposta do PC."; return 1
+          @'
+          NTUSER.DAT*
+          ntuser.ini
+          UsrClass.dat*
+          **/AppData/Local/Temp/**
+          **/AppData/Local/Microsoft/Windows/**
+          **/AppData/Local/Packages/**
+          **/Cache/**
+          **/Code Cache/**
+          **/GPUCache/**
+          **/CacheStorage/**
+          **/LOCK
+          **/lockfile
+          **/Singleton*
+          $Recycle.Bin/**
+          System Volume Information/**
+          /Microsoft/**
+          /Package Cache/**
+          /Tailscale/**
+          /ssh/**
+          /WindowsApps/**
+          /Windows */**
+          /Windows*/**
+          /Common Files/**
+          /Internet Explorer/**
+          /Microsoft*/**
+          /rclone*/**
+          '@ | Set-Content 'C:\pc\exclude.txt' -Encoding ascii
+          @'
+          $script:rc = 'C:\pc\rclone.exe'; $script:conf = 'C:\pc\rclone.conf'; $script:remote = $env:REMOTE
+          $script:excl = 'C:\pc\exclude.txt'; $script:lastBackup = ''
+          $script:temaArq = 'C:\Users\Rafael\tema-windows.json'
+          $script:temaChave = 'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+          $script:temaVals = @('AppsUseLightTheme', 'SystemUsesLightTheme', 'EnableTransparency', 'ColorPrevalence')
+          function Log($m) { Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) }
+          function RC { & $script:rc --config $script:conf @args 2>&1 | Out-Host }
+          function Put-State($n, $o) {
+          ($o | ConvertTo-Json -Depth 5 -Compress) | & $script:rc --config $script:conf rcat "$($script:remote)/state/$n.json" 2>$null
+          return ($LASTEXITCODE -eq 0)
           }
-          case "$ACAO" in
-            status)
-              c="$(get current)"
-              if [ -z "$c" ]; then echo "Sem registro de PC."; else
-                echo "$c" | jq .
-                alive && echo ">> PC ATIVO" || echo ">> PC não está ativo"
-              fi
-              get last_backup | jq . 2>/dev/null || echo "Nenhum backup." ;;
-            backup|desligar|migrar)
-              alive || { echo "Nenhum PC ativo. Use 'ligar'."; exit 1; }
-              send "$ACAO" ;;
-            destruir)
-              [ "$CONFIRMAR" = "DESTRUIR" ] || { echo "Escreva DESTRUIR no campo confirmar_destruir."; exit 1; }
-              if alive; then send desligar || { echo "Não consegui desligar o PC; nada foi apagado."; exit 1; }; fi
-              rclone purge "$R" && echo "Backup e estado apagados." ;;
-          esac
+          function Get-State($n) {
+          $t = & $script:rc --config $script:conf cat "$($script:remote)/state/$n.json" 2>$null
+          if ($LASTEXITCODE -ne 0 -or -not $t) { return $null }
+          try { return (($t -join "`n") | ConvertFrom-Json) } catch { return $null }
+          }
+          function Get-Paths {
+          $env:BACKUP_PATHS -split ';' | Where-Object { $_ } | ForEach-Object {
+          [pscustomobject]@{ Local = $_; Name = (($_ -replace '^[A-Za-z]:\\', '') -replace '[\\ :]', '_') }
+          }
+          }
+          function Open-HiveRafael {
+          $sid = $null
+          try { $sid = (New-Object System.Security.Principal.NTAccount('Rafael')).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { }
+          if ($sid -and (Test-Path "Registry::HKEY_USERS\$sid")) { return @{ Raiz = "HKU\$sid"; Carregado = $false } }
+          if (-not (Test-Path 'C:\Users\Rafael\NTUSER.DAT')) { return $null }
+          & reg.exe load HKU\RafaelTmp 'C:\Users\Rafael\NTUSER.DAT' 2>&1 | Out-Null
+          if ($LASTEXITCODE -ne 0) { return $null }
+          return @{ Raiz = 'HKU\RafaelTmp'; Carregado = $true }
+          }
+          function Close-HiveRafael($h) {
+          if ($h -and $h.Carregado) { [gc]::Collect(); Start-Sleep 1; & reg.exe unload HKU\RafaelTmp 2>&1 | Out-Null }
+          }
+          function Save-Tema {
+          try {
+          $h = Open-HiveRafael
+          if (-not $h) { return }
+          $o = @{}
+          foreach ($v in $script:temaVals) {
+          $q = (& reg.exe query "$($h.Raiz)\$($script:temaChave)" /v $v 2>$null | Out-String)
+          if ($q -match 'REG_DWORD\s+0x([0-9a-fA-F]+)') { $o[$v] = [Convert]::ToInt32($Matches[1], 16) }
+          }
+          if ($o.Count -gt 0 -and (Test-Path 'C:\Users\Rafael')) {
+          ($o | ConvertTo-Json -Compress) | Set-Content $script:temaArq -Encoding ascii
+          }
+          Close-HiveRafael $h
+          } catch { Log "Tema (melhor esforço): $($_.Exception.Message)" }
+          }
+          function Restore-Tema {
+          try {
+          if (-not (Test-Path $script:temaArq)) { return }
+          $o = Get-Content $script:temaArq -Raw | ConvertFrom-Json
+          $h = Open-HiveRafael
+          if (-not $h) { return }
+          foreach ($p in $o.PSObject.Properties) {
+          & reg.exe add "$($h.Raiz)\$($script:temaChave)" /v $p.Name /t REG_DWORD /d ([int]$p.Value) /f 2>&1 | Out-Null
+          }
+          Close-HiveRafael $h
+          } catch { Log "Tema (melhor esforço): $($_.Exception.Message)" }
+          }
+          function Invoke-Backup {
+          $ok = $true; $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+          Save-Tema
+          foreach ($p in Get-Paths) {
+          if (-not (Test-Path $p.Local)) { continue }
+          if (-not (Get-ChildItem $p.Local -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) { continue }
+          RC sync $p.Local "$($script:remote)/data/$($p.Name)" --exclude-from $script:excl --backup-dir "$($script:remote)/_lixeira/$stamp/$($p.Name)" --transfers 8 --checkers 16 --retries 3 -q
+          if ($LASTEXITCODE -ne 0) { Log "Falha no backup de $($p.Local)"; $ok = $false }
+          }
+          RC delete "$($script:remote)/_lixeira" --min-age 7d -q
+          return $ok
+          }
+          function Save-BackupInfo($v) {
+          $script:lastBackup = (Get-Date).ToUniversalTime().ToString('o')
+          [void](Put-State 'last_backup' @{ em = $script:lastBackup })
+          }
+          function Invoke-Restore {
+          $ok = $true
+          foreach ($p in Get-Paths) {
+          New-Item -ItemType Directory -Force $p.Local | Out-Null
+          RC copy "$($script:remote)/data/$($p.Name)" $p.Local --transfers 16 --checkers 16 --retries 3 -q
+          if ($LASTEXITCODE -ne 0) { $ok = $false; Log "Falha ao restaurar $($p.Local)" }
+          }
+          Restore-Tema
+          return $ok
+          }
+          function Update-Heartbeat($status) {
+          [void](Put-State 'current' @{
+          run_id = "$env:GITHUB_RUN_ID"; host = $env:TS_HOST; ip = $env:TS_IP
+          last_seen = (Get-Date).ToUniversalTime().ToString('o'); status = $status
+          last_backup = $script:lastBackup; usuario = 'Rafael'
+          })
+          }
+          '@ | Set-Content 'C:\pc\lib.ps1' -Encoding utf8
+          exit 0
+
+      - name: Verificar se já existe PC ativo
+        shell: pwsh
+        run: |
+          if ($env:STORAGE -ne '1' -or $env:ORIGEM_RUN) { Write-Host 'Nada a verificar.'; exit 0 }
+          . 'C:\pc\lib.ps1'
+          $c = Get-State 'current'
+          if ($c -and $c.status -ne 'desligado') {
+          $ativo = $true
+          try {
+          $age = ((Get-Date).ToUniversalTime() - ([datetimeoffset]$c.last_seen).UtcDateTime).TotalMinutes
+          if ($age -ge 15) { $ativo = $false }
+          } catch { $ativo = $false }
+          if ($ativo -and $c.run_id) {
+          $s = gh run view $c.run_id --repo $env:GITHUB_REPOSITORY --json status --jq .status 2>$null
+          if ($LASTEXITCODE -eq 0 -and $s -eq 'completed') { $ativo = $false }
+          }
+          if ($ativo) { Write-Error "Já existe um PC ativo (run $($c.run_id), IP $($c.ip)). Use 'desligar' antes."; exit 1 }
+          }
+          if ($env:ACAO -eq 'restaurar' -and -not (Get-State 'last_backup')) { Write-Error 'Não há backup para restaurar.'; exit 1 }
+          exit 0
+
+      - name: Criar usuário Rafael e habilitar RDP
+        shell: pwsh
+        run: |
+          $sec = ConvertTo-SecureString $env:RDP_SENHA -AsPlainText -Force
+          New-LocalUser -Name 'Rafael' -Password $sec -FullName 'Rafael' -PasswordNeverExpires -AccountNeverExpires | Out-Null
+          Add-LocalGroupMember -Group 'Administrators' -Member 'Rafael'
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'Rafael'
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
+          try {
+          $cred = New-Object System.Management.Automation.PSCredential('.\Rafael', $sec)
+          Start-Process cmd.exe -ArgumentList '/c exit 0' -Credential $cred -LoadUserProfile -WorkingDirectory 'C:\Windows\System32' -Wait -WindowStyle Hidden
+          } catch { Write-Host "Perfil (melhor esforço): $($_.Exception.Message)" }
+          exit 0
+
+      - name: Restaurar dados (restaurar ou nova máquina da migração)
+        if: ${{ inputs.acao == 'restaurar' || inputs.origem_run != '' }}
+        shell: pwsh
+        run: |
+          . 'C:\pc\lib.ps1'
+          $mig = [bool]$env:ORIGEM_RUN
+          if (-not (Invoke-Restore)) {
+          if ($mig) { Write-Host '::warning::Restauração inicial incompleta; refaço na sincronização final.' }
+          else { Write-Error 'A restauração falhou.'; exit 1 }
+          }
+          if ($mig) {
+          [void](Put-State 'novo_pronto' @{ origem = "$env:ORIGEM_RUN" })
+          Log 'Novo PC pronto. Aguardando a máquina antiga fazer o backup final...'
+          $lim = (Get-Date).AddMinutes(40)
+          while ((Get-Date) -lt $lim) {
+          $c = Get-State 'current'
+          if (-not $c -or "$($c.run_id)" -ne "$env:ORIGEM_RUN" -or $c.status -in 'migrando', 'desligado') { break }
+          if (((Get-Date).ToUniversalTime() - ([datetimeoffset]$c.last_seen).UtcDateTime).TotalMinutes -ge 15) { break }
+          Start-Sleep 15
+          }
+          Log 'Sincronização final dos arquivos...'
+          foreach ($p in Get-Paths) {
+          New-Item -ItemType Directory -Force $p.Local | Out-Null
+          RC copy "$($script:remote)/data/$($p.Name)" $p.Local --transfers 16 --checkers 16 --retries 3 -q
+          }
+          Restore-Tema
+          }
+          exit 0
+
+      - name: Conectar ao Tailscale e mostrar dados de acesso
+        shell: pwsh
+        run: |
+          $arch = if ($env:RUNNER_TIPO -eq 'windows-11-arm') { 'arm64' } else { 'amd64' }
+          Invoke-WebRequest -UseBasicParsing -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-$arch.msi" -OutFile 'C:\pc\ts.msi'
+          Start-Process msiexec.exe -ArgumentList '/i C:\pc\ts.msi /quiet /norestart' -Wait
+          $ts = 'C:\Program Files\Tailscale\tailscale.exe'
+          if (-not (Test-Path $ts)) { Write-Error 'Falha ao instalar o Tailscale.'; exit 1 }
+          Start-Service Tailscale -ErrorAction SilentlyContinue
+          $ok = $false
+          for ($i = 1; $i -le 3 -and -not $ok; $i++) {
+          & $ts up --auth-key=$env:TS_KEY --hostname=$env:NOME_PC --unattended --accept-dns=false --reset 2>&1 | Out-Host
+          if ($LASTEXITCODE -eq 0) { $ok = $true } else { Start-Sleep 10 }
+          }
+          if (-not $ok) { Write-Error 'Não consegui conectar ao Tailscale. Confira o TAILSCALE_AUTH_KEY.'; exit 1 }
+          $ip = ''
+          for ($i = 0; $i -lt 30 -and -not $ip; $i++) { $ip = (& $ts ip -4 2>$null | Select-Object -First 1); if (-not $ip) { Start-Sleep 2 } }
+          if (-not $ip) { Write-Error 'Tailscale conectou, mas sem IP.'; exit 1 }
+          $nome = $env:NOME_PC
+          try { $j = ((& $ts status --json) -join "`n") | ConvertFrom-Json; if ($j.Self.HostName) { $nome = $j.Self.HostName } } catch { }
+          "TS_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TS_HOST=$nome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $esp = ($env:RDP_SENHA.ToCharArray() -join ' ')
+          Write-Host "Nome na rede : $nome"
+          Write-Host "Endereço IP  : $ip"
+          Write-Host 'Usuário      : Rafael'
+          Write-Host "Senha        : $esp   (digite sem os espaços)"
+          Write-Host "Comando RDP  : mstsc /v:$ip"
+          Write-Host "::notice title=PC remoto pronto::IP: $ip | Usuário: Rafael | Senha: $esp (sem espaços) | Nome: $nome"
+          @('## PC remoto pronto', '', "- IP (código de acesso): ``$ip``", '- Usuário: ``Rafael``', "- Senha: ``$esp`` (digite sem os espaços)", "- Nome na rede: ``$nome``") | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          exit 0
+
+      - name: Manter o PC ligado (backup e comandos)
+        shell: pwsh
+        run: |
+          . 'C:\pc\lib.ps1'
+          $ts = 'C:\Program Files\Tailscale\tailscale.exe'
+          Write-Host "ACESSO >> IP: $env:TS_IP | Usuário: Rafael | Senha: $($env:RDP_SENHA.ToCharArray() -join ' ') (sem espaços)"
+          function Agora { [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
+          $fim = [int64]$env:START_EPOCH + [int]$env:MINUTOS * 60
+          if ($env:STORAGE -ne '1') { while ((Agora) -lt $fim) { Start-Sleep 60 }; exit 0 }
+          $intervalo = [int]$env:INTERVALO_BACKUP_MIN * 60
+          $migraEm = [int64]$env:START_EPOCH + [int]$env:MIGRAR_AOS * 60
+          $migrando = $false; $ackMig = ''
+          function Iniciar-Migracao {
+          $wf = [IO.Path]::GetFileName(($env:GITHUB_WORKFLOW_REF -split '@')[0])
+          gh workflow run $wf --repo $env:GITHUB_REPOSITORY --ref $env:GITHUB_REF_NAME -f acao=ligar -f runner=$env:RUNNER_TIPO -f minutos=$env:MINUTOS -f nome_pc=$env:NOME_PC -f migrar_aos=$env:MIGRAR_AOS -f origem_run=$env:GITHUB_RUN_ID 2>&1 | Out-Host
+          return ($LASTEXITCODE -eq 0)
+          }
+          function Ack($id, $ok, $msg) { [void](Put-State 'ack' @{ id = "$id"; ok = [bool]$ok; msg = $msg }) }
+          function Rodar-Job($fn, $st) {
+          $job = Start-Job -ScriptBlock { param($f) . 'C:\pc\lib.ps1'; $r = & $f; [bool]$r } -ArgumentList $fn
+          while ($job.State -eq 'Running') { Update-Heartbeat $st; Start-Sleep 20 }
+          $res = @(Receive-Job $job -ErrorAction SilentlyContinue)
+          Remove-Job $job -Force
+          if ($res.Count -eq 0) { return $false }
+          return [bool]$res[-1]
+          }
+          function Encerrar($id) {
+          $b = Rodar-Job 'Invoke-Backup' 'encerrando'
+          Save-BackupInfo $b
+          Update-Heartbeat 'desligado'
+          & $ts logout 2>&1 | Out-Null
+          if ($id) { Ack $id $b 'PC desligado' }
+          exit 0
+          }
+          function Entregar($id) {
+          $b = Rodar-Job 'Invoke-Backup' 'entregando'
+          Save-BackupInfo $b
+          Update-Heartbeat 'migrando'
+          & $ts logout 2>&1 | Out-Null
+          if ($id) { Ack $id $b 'Migração concluída' }
+          exit 0
+          }
+          $c0 = Get-State 'command'
+          $ultimo = if ($c0) { "$($c0.id)" } else { '' }
+          Update-Heartbeat 'ligado'
+          $ub = Agora
+          while ($true) {
+          $a = Agora
+          Update-Heartbeat 'ligado'
+          $c = Get-State 'command'
+          if ($c -and "$($c.id)" -ne $ultimo) {
+          $ultimo = "$($c.id)"
+          if ($c.acao -eq 'backup') {
+          $b = Rodar-Job 'Invoke-Backup' 'backup'
+          Save-BackupInfo $b; $ub = Agora
+          Ack $c.id $b 'Backup concluído'
+          } elseif ($c.acao -eq 'desligar') { Encerrar $c.id }
+          elseif ($c.acao -eq 'migrar') {
+          if (-not $migrando) {
+          $migrando = Iniciar-Migracao
+          if ($migrando) { $ackMig = "$($c.id)" } else { Ack $c.id $false 'Falha ao iniciar a nova máquina' }
+          } else { $ackMig = "$($c.id)" }
+          }
+          }
+          if (-not $migrando -and $a -ge $migraEm) {
+          $migrando = Iniciar-Migracao
+          if (-not $migrando) { $migraEm = $a + 600 }
+          }
+          if ($migrando) {
+          $np = Get-State 'novo_pronto'
+          if ($np -and "$($np.origem)" -eq "$env:GITHUB_RUN_ID") { Entregar $ackMig }
+          }
+          if (($a - $ub) -ge $intervalo) {
+          $b = Rodar-Job 'Invoke-Backup' 'backup'
+          if ($b) { Save-BackupInfo $false }
+          $ub = Agora
+          }
+          $lf = if ($migrando) { $fim + 600 } else { $fim }
+          if ($a -ge $lf) { Encerrar $ackMig }
+          Start-Sleep 20
+          }
+          
