@@ -25,6 +25,10 @@ on:
         description: Minuto em que inicia a migração (290 = 4h50)
         type: string
         default: "290"
+      atualizar_26h2:
+        description: "Buscar e instalar o Windows 11 26H2 ao ligar (não reinicia)"
+        type: boolean
+        default: true
       origem_run:
         description: "Uso interno: deixe vazio"
         type: string
@@ -245,6 +249,44 @@ jobs:
           } catch { Write-Host "Perfil (melhor esforço): $($_.Exception.Message)" }
           exit 0
 
+      - name: Tentar instalar o Windows 11 26H2 (experimental)
+        if: ${{ inputs.atualizar_26h2 }}
+        continue-on-error: true
+        timeout-minutes: 40
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Versao { $v = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'; "$($v.ProductName) | versão $($v.DisplayVersion) | build $($v.CurrentBuild).$($v.UBR)" }
+          Write-Host "Antes : $(Versao)"
+          try {
+          Set-Service -Name wuauserv -StartupType Manual -ErrorAction SilentlyContinue
+          Start-Service -Name wuauserv -ErrorAction SilentlyContinue
+          $sess = New-Object -ComObject Microsoft.Update.Session
+          $busca = $sess.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Software'")
+          $alvo = @($busca.Updates | Where-Object { $_.Title -match '26H2' })
+          if ($alvo.Count -eq 0) {
+          Write-Host '::warning::O Windows Update não ofereceu o 26H2 para esta máquina. Nada foi instalado.'
+          exit 0
+          }
+          $col = New-Object -ComObject Microsoft.Update.UpdateColl
+          foreach ($u in $alvo) {
+          Write-Host "Encontrado: $($u.Title)"
+          if (-not $u.EulaAccepted) { $u.AcceptEula() }
+          [void]$col.Add($u)
+          }
+          $dl = $sess.CreateUpdateDownloader(); $dl.Updates = $col
+          $rd = $dl.Download()
+          Write-Host "Download: código $($rd.ResultCode)"
+          $ins = $sess.CreateUpdateInstaller(); $ins.Updates = $col
+          $ri = $ins.Install()
+          Write-Host "Instalação: código $($ri.ResultCode) (2 = ok) | reinício pendente: $($ri.RebootRequired)"
+          if ($ri.RebootRequired) {
+          Write-Host '::warning::A versão 26H2 só ativa depois de reiniciar. Não reinicio de propósito, pois reiniciar derruba o PC do GitHub. Nada muda nesta sessão.'
+          }
+          } catch { Write-Host "::warning::Falha ao tentar atualizar (o PC segue normal): $($_.Exception.Message)" }
+          Write-Host "Depois: $(Versao)"
+          exit 0
+
       - name: Restaurar dados (restaurar ou nova máquina da migração)
         if: ${{ inputs.acao == 'restaurar' || inputs.origem_run != '' }}
         shell: pwsh
@@ -338,53 +380,4 @@ jobs:
           Update-Heartbeat 'desligado'
           & $ts logout 2>&1 | Out-Null
           if ($id) { Ack $id $b 'PC desligado' }
-          exit 0
-          }
-          function Entregar($id) {
-          $b = Rodar-Job 'Invoke-Backup' 'entregando'
-          Save-BackupInfo $b
-          Update-Heartbeat 'migrando'
-          & $ts logout 2>&1 | Out-Null
-          if ($id) { Ack $id $b 'Migração concluída' }
-          exit 0
-          }
-          $c0 = Get-State 'command'
-          $ultimo = if ($c0) { "$($c0.id)" } else { '' }
-          Update-Heartbeat 'ligado'
-          $ub = Agora; $falhas = 0
-          while ($true) {
-          $a = Agora
-          Update-Heartbeat 'ligado'
-          $c = Get-State 'command'
-          if ($c -and "$($c.id)" -ne $ultimo) {
-          $ultimo = "$($c.id)"
-          if ($c.acao -eq 'backup') {
-          $b = Rodar-Job 'Invoke-Backup' 'backup'
-          Save-BackupInfo $b; $ub = Agora
-          Ack $c.id $b 'Backup concluído'
-          } elseif ($c.acao -eq 'desligar') { Encerrar $c.id }
-          elseif ($c.acao -eq 'migrar') {
-          if (-not $migrando) {
-          $migrando = Iniciar-Migracao
-          if ($migrando) { $ackMig = "$($c.id)" } else { Ack $c.id $false 'Falha ao iniciar a nova máquina' }
-          } else { $ackMig = "$($c.id)" }
-          }
-          }
-          if (-not $migrando -and $a -ge $migraEm) {
-          $migrando = Iniciar-Migracao
-          if (-not $migrando) { $migraEm = $a + 600 }
-          }
-          if ($migrando) {
-          $np = Get-State 'novo_pronto'
-          if ($np -and "$($np.origem)" -eq "$env:GITHUB_RUN_ID") { Entregar $ackMig }
-          }
-          if (($a - $ub) -ge $intervalo) {
-          $b = Rodar-Job 'Invoke-Backup' 'backup'
-          if ($b) { Save-BackupInfo $false; $falhas = 0 } elseif (++$falhas -ge 2) { Write-Error 'O salvamento falhou 2 vezes seguidas; encerrando.'; exit 1 }
-          $ub = Agora
-          }
-          $lf = if ($migrando) { $fim + 600 } else { $fim }
-          if ($a -ge $lf) { Encerrar $ackMig }
-          Start-Sleep 20
-          }
-          
+          ex
