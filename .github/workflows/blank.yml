@@ -262,10 +262,12 @@ jobs:
           Set-Service -Name wuauserv -StartupType Manual -ErrorAction SilentlyContinue
           Start-Service -Name wuauserv -ErrorAction SilentlyContinue
           $sess = New-Object -ComObject Microsoft.Update.Session
-          $busca = $sess.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Software'")
-          $alvo = @($busca.Updates | Where-Object { $_.Title -match '26H2' })
+          $busca = $sess.CreateUpdateSearcher().Search("IsInstalled=0")
+          Write-Host "Atualizações oferecidas ($($busca.Updates.Count)):"
+          foreach ($u in $busca.Updates) { Write-Host " - $($u.Title) [KB $($u.KBArticleIDs -join ',')]" }
+          $alvo = @($busca.Updates | Where-Object { $_.Title -match '26H2' -or ($_.KBArticleIDs -contains '5121794') })
           if ($alvo.Count -eq 0) {
-          Write-Host '::warning::O Windows Update não ofereceu o 26H2 para esta máquina. Nada foi instalado.'
+          Write-Host '::warning::O Windows Update não listou o 26H2 (KB5121794) para esta máquina. Veja a lista acima. Nada foi instalado.'
           exit 0
           }
           $col = New-Object -ComObject Microsoft.Update.UpdateColl
@@ -286,8 +288,7 @@ jobs:
           } catch { Write-Host "::warning::Falha ao tentar atualizar (o PC segue normal): $($_.Exception.Message)" }
           Write-Host "Depois: $(Versao)"
           exit 0
-
-      - name: Restaurar dados (restaurar ou nova máquina da migração)
+                - name: Restaurar dados (restaurar ou nova máquina da migração)
         if: ${{ inputs.acao == 'restaurar' || inputs.origem_run != '' }}
         shell: pwsh
         run: |
@@ -380,4 +381,54 @@ jobs:
           Update-Heartbeat 'desligado'
           & $ts logout 2>&1 | Out-Null
           if ($id) { Ack $id $b 'PC desligado' }
-          ex
+          exit 0
+          }
+          function Entregar($id) {
+          $b = Rodar-Job 'Invoke-Backup' 'entregando'
+          Save-BackupInfo $b
+          Update-Heartbeat 'migrando'
+          & $ts logout 2>&1 | Out-Null
+          if ($id) { Ack $id $b 'Migração concluída' }
+          exit 0
+          }
+          $c0 = Get-State 'command'
+          $ultimo = if ($c0) { "$($c0.id)" } else { '' }
+          Update-Heartbeat 'ligado'
+          $ub = Agora; $falhas = 0
+          while ($true) {
+          $a = Agora
+          Update-Heartbeat 'ligado'
+          $c = Get-State 'command'
+          if ($c -and "$($c.id)" -ne $ultimo) {
+          $ultimo = "$($c.id)"
+          if ($c.acao -eq 'backup') {
+          $b = Rodar-Job 'Invoke-Backup' 'backup'
+          Save-BackupInfo $b; $ub = Agora
+          Ack $c.id $b 'Backup concluído'
+          } elseif ($c.acao -eq 'desligar') { Encerrar $c.id }
+          elseif ($c.acao -eq 'migrar') {
+          if (-not $migrando) {
+          $migrando = Iniciar-Migracao
+          if ($migrando) { $ackMig = "$($c.id)" } else { Ack $c.id $false 'Falha ao iniciar a nova máquina' }
+          } else { $ackMig = "$($c.id)" }
+          }
+          }
+          if (-not $migrando -and $a -ge $migraEm) {
+          $migrando = Iniciar-Migracao
+          if (-not $migrando) { $migraEm = $a + 600 }
+          }
+          if ($migrando) {
+          $np = Get-State 'novo_pronto'
+          if ($np -and "$($np.origem)" -eq "$env:GITHUB_RUN_ID") { Entregar $ackMig }
+          }
+          if (($a - $ub) -ge $intervalo) {
+          $b = Rodar-Job 'Invoke-Backup' 'backup'
+          if ($b) { Save-BackupInfo $false; $falhas = 0 } elseif (++$falhas -ge 2) { Write-Error 'O salvamento falhou 2 vezes seguidas; encerrando.'; exit 1 }
+          $ub = Agora
+          }
+          $lf = if ($migrando) { $fim + 600 } else { $fim }
+          if ($a -ge $lf) { Encerrar $ackMig }
+          Start-Sleep 20
+          }
+          
+          
